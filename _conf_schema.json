@@ -37,12 +37,12 @@
   },
   "use_at_all": {
     "description": "是否在广播消息开头 @全体成员（需权限且平台支持）",
-    "type": "boolean",
+    "type": "bool",
     "default": false
   },
   "enable_markdown": {
     "description": "是否允许发送 Markdown 消息（内容以 [MD] 开头时生效）",
-    "type": "boolean",
+    "type": "bool",
     "default": false
   },
   "allowed_users": {
@@ -53,13 +53,13 @@
   },
   "max_message_length": {
     "description": "纯文本广播自动分段的最长长度（字符数）",
-    "type": "integer",
+    "type": "int",
     "hint": "默认 500",
     "default": 500
   },
   "max_log_entries": {
     "description": "最多保留广播历史记录条数",
-    "type": "integer",
+    "type": "int",
     "hint": "默认 100",
     "default": 100
   }
