@@ -1,6 +1,11 @@
+以下是 README.md 文件内容，请保存到插件目录下：
+
 ```markdown
 # 📢 AstrBot 广播插件 Plus
 
+[![AstrBot](https://img.shields.io/badge/AstrBot-插件-brightgreen)](https://github.com/Soulter/AstrBot)
+[![Version](https://img.shields.io/badge/version-2.0.0-blue)](./metadata.yaml)
+[![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 
 功能强大的机器人广播插件，支持私聊向全部群或指定群发送消息、定时广播、@全体成员、黑名单过滤、权限管理、Markdown / 图片消息、消息撤回、超长文本自动分段、广播历史记录等。
 
@@ -38,21 +43,14 @@
 ⚠️ 所有指令仅限私聊使用。
 
 指令 说明 示例
-/broadcast_all <文本> 向 Bot 加入的全部群发送广播 
-/broadcast_all 晚上开会哦~
-/broadcast_to <群号> <文本> 向指定群（多个用逗号分隔）发送广播 
-/broadcast_to 123456,789012 大家好
-/broadcast_status 查看定时广播状态 
-/broadcast_status
-/broadcast_pause 暂停定时广播 
-/broadcast_pause
-/broadcast_resume 恢复定时广播 
-/broadcast_resume
-/broadcast_log [条数] 查看最近广播历史 
-/broadcast_log 5
-/broadcast_recall <群号> 撤回该群最近一条广播 
-/broadcast_recall 123456
-/broadcast_help 显示帮助信息 
+/broadcast_all <文本> 向 Bot 加入的全部群发送广播 /broadcast_all 晚上开会哦~
+/broadcast_to <群号> <文本> 向指定群（多个用逗号分隔）发送广播 /broadcast_to 123456,789012 大家好
+/broadcast_status 查看定时广播状态 /broadcast_status
+/broadcast_pause 暂停定时广播 /broadcast_pause
+/broadcast_resume 恢复定时广播 /broadcast_resume
+/broadcast_log [条数] 查看最近广播历史 /broadcast_log 5
+/broadcast_recall <群号> 撤回该群最近一条广播 /broadcast_recall 123456
+/broadcast_help 显示帮助信息 /broadcast_help
 
 ---
 
@@ -104,5 +102,24 @@ astrbot_plugin_broadcast/
 ```
 
 广播日志文件将自动保存在 data/astrbot_plugin_broadcast/broadcast_log.json。
+
+---
+
+❓ 常见问题
+
+Q: 为什么群聊里发指令没反应？
+A: 所有广播指令仅在私聊下生效，请私聊机器人使用。
+
+Q: 提示“未获取到任何群聊”怎么办？
+A: 请在 WebUI 配置中填写 group_overrides，手动输入你要广播的群号。
+
+Q: 撤回功能无效？
+A: 撤回需要平台适配器支持返回消息 ID 并提供撤回接口，且消息未过期（通常 2 分钟内）。如果平台不支持，该功能会返回失败提示。
+
+Q: 定时广播怎么停止？
+A: 清空 cron_expr 配置并保存，或使用 /broadcast_pause 暂停，重载插件即可彻底停止调度器。
+
+Q: Markdown 消息不显示效果？
+A: 请确认平台适配器已实现 Markdown 组件，并在 WebUI 中开启 enable_markdown。
 
 ---
