@@ -38,14 +38,21 @@
 ⚠️ 所有指令仅限私聊使用。
 
 指令 说明 示例
-/broadcast_all <文本> 向 Bot 加入的全部群发送广播 /broadcast_all 晚上开会哦~
-/broadcast_to <群号> <文本> 向指定群（多个用逗号分隔）发送广播 /broadcast_to 123456,789012 大家好
-/broadcast_status 查看定时广播状态 /broadcast_status
-/broadcast_pause 暂停定时广播 /broadcast_pause
-/broadcast_resume 恢复定时广播 /broadcast_resume
-/broadcast_log [条数] 查看最近广播历史 /broadcast_log 5
-/broadcast_recall <群号> 撤回该群最近一条广播 /broadcast_recall 123456
-/broadcast_help 显示帮助信息 /broadcast_help
+/broadcast_all <文本> 向 Bot 加入的全部群发送广播 
+/broadcast_all 晚上开会哦~
+/broadcast_to <群号> <文本> 向指定群（多个用逗号分隔）发送广播 
+/broadcast_to 123456,789012 大家好
+/broadcast_status 查看定时广播状态 
+/broadcast_status
+/broadcast_pause 暂停定时广播 
+/broadcast_pause
+/broadcast_resume 恢复定时广播 
+/broadcast_resume
+/broadcast_log [条数] 查看最近广播历史 
+/broadcast_log 5
+/broadcast_recall <群号> 撤回该群最近一条广播 
+/broadcast_recall 123456
+/broadcast_help 显示帮助信息 
 
 ---
 
