@@ -21,10 +21,10 @@ except ImportError:
 
 @register(
     name="astrbot_plugin_broadcast",
-    author="YourName",
+    author="Care",
     desc="支持私聊广播到全部/指定群聊，定时广播，@全体成员，历史记录，黑名单，权限控制，Markdown/图片，撤回，分段发送。",
-    version="2.0.0",
-    repo="https://github.com/YourName/astrbot_plugin_broadcast",
+    version="1.3.0",
+    repo="https://github.com/Care0721/astrbot_plugin_broadcast",
 )
 class BroadcastPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
