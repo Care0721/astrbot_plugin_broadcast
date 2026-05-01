@@ -1,7 +1,5 @@
-以下是 README.md 文件内容，请保存到插件目录下：
-
 ```markdown
-# 📢 AstrBot 广播插件 Plus
+### 📢 AstrBot 广播插件 
 
 [![AstrBot](https://img.shields.io/badge/AstrBot-插件-brightgreen)](https://github.com/Soulter/AstrBot)
 [![Version](https://img.shields.io/badge/version-2.0.0-blue)](./metadata.yaml)
