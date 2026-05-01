@@ -1,0 +1,66 @@
+{
+  "group_overrides": {
+    "description": "手动指定广播目标群 ID 列表，逗号分隔。留空则尝试自动获取（需平台支持）",
+    "type": "string",
+    "hint": "例如: 123456,789012",
+    "default": ""
+  },
+  "blacklist_groups": {
+    "description": "不接收广播的群 ID 黑名单，逗号分隔",
+    "type": "string",
+    "hint": "例如: 666666,999999",
+    "default": ""
+  },
+  "cron_expr": {
+    "description": "定时广播的 Cron 表达式",
+    "type": "string",
+    "hint": "例如: 0 9 * * * 表示每天 9:00 执行",
+    "default": ""
+  },
+  "cron_text": {
+    "description": "定时广播的文本内容",
+    "type": "text",
+    "hint": "填入定时广播要发送的消息，支持 [img:url] 和 [MD] 标记",
+    "default": ""
+  },
+  "cron_target_groups": {
+    "description": "定时广播的目标群 ID，逗号分隔。留空则使用 group_overrides 中的群",
+    "type": "string",
+    "hint": "例如: 123456,789012",
+    "default": ""
+  },
+  "platform_name": {
+    "description": "用于定时广播的平台标识（需与统一消息源前缀一致）",
+    "type": "string",
+    "hint": "默认 aiocqhttp，QQ 官方机器人填 qq_official",
+    "default": "aiocqhttp"
+  },
+  "use_at_all": {
+    "description": "是否在广播消息开头 @全体成员（需权限且平台支持）",
+    "type": "boolean",
+    "default": false
+  },
+  "enable_markdown": {
+    "description": "是否允许发送 Markdown 消息（内容以 [MD] 开头时生效）",
+    "type": "boolean",
+    "default": false
+  },
+  "allowed_users": {
+    "description": "允许使用广播指令的用户 ID，逗号分隔。为空表示不限制",
+    "type": "string",
+    "hint": "例如: admin_user_id,user2",
+    "default": ""
+  },
+  "max_message_length": {
+    "description": "纯文本广播自动分段的最长长度（字符数）",
+    "type": "integer",
+    "hint": "默认 500",
+    "default": 500
+  },
+  "max_log_entries": {
+    "description": "最多保留广播历史记录条数",
+    "type": "integer",
+    "hint": "默认 100",
+    "default": 100
+  }
+}
