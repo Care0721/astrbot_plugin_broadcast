@@ -11,7 +11,9 @@ from apscheduler.triggers.cron import CronTrigger
 from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger, AstrBotConfig
-from astrbot.api.message_components import Plain, AtAll, Image, MessageChain
+from astrbot.api.message_components import Plain, AtAll, Image  # 不再导入 MessageChain
+
+# 尝试导入 Markdown 组件
 try:
     from astrbot.api.message_components import Markdown
     HAS_MARKDOWN = True
@@ -31,8 +33,8 @@ class BroadcastPlugin(Star):
         super().__init__(context)
         self.config = config
         self.scheduler: Optional[AsyncIOScheduler] = None
-        self._paused: bool = False  # 定时广播暂停状态（不持久化）
-        self._last_broadcast_msgs: Dict[str, Any] = {}  # group_id -> 消息对象，用于撤回
+        self._paused: bool = False
+        self._last_broadcast_msgs: Dict[str, Any] = {}
 
         # 数据目录
         self.data_dir = os.path.join(os.getcwd(), "data", "astrbot_plugin_broadcast")
@@ -70,7 +72,7 @@ class BroadcastPlugin(Star):
         try:
             with open(self.log_file, "r+", encoding="utf-8") as f:
                 logs = json.load(f)
-                logs.insert(0, entry)  # 最新在前
+                logs.insert(0, entry)
                 if len(logs) > self.max_log_entries:
                     logs = logs[:self.max_log_entries]
                 f.seek(0)
@@ -81,7 +83,7 @@ class BroadcastPlugin(Star):
 
     def _check_permission(self, event: AstrMessageEvent) -> bool:
         if not self.allowed_users:
-            return True  # 未设置白名单则允许所有人
+            return True
         sender_id = event.get_sender_id()
         return sender_id in self.allowed_users
 
@@ -96,13 +98,11 @@ class BroadcastPlugin(Star):
         return ""
 
     async def _get_all_groups(self, event: AstrMessageEvent) -> List[str]:
-        """获取全部群 ID，并自动过滤黑名单"""
         group_overrides_str = self.config.get("group_overrides", "")
         group_overrides = [g.strip() for g in group_overrides_str.split(",") if g.strip()]
         if group_overrides:
             groups = group_overrides
         else:
-            # 尝试自动获取
             platform = event.platform_meta.name
             groups = []
             try:
@@ -113,7 +113,6 @@ class BroadcastPlugin(Star):
             except Exception as e:
                 logger.warning(f"自动获取群列表失败: {e}")
 
-        # 过滤黑名单
         if self.blacklist_groups:
             groups = [g for g in groups if g not in self.blacklist_groups]
         return groups
@@ -125,46 +124,33 @@ class BroadcastPlugin(Star):
             return f"{parts[0]}:{group_id}"
         return umo
 
-    def _parse_message_chain(self, text: str) -> MessageChain:
+    def _parse_message_components(self, text: str) -> list:
         """
-        根据文本构建消息链：
-        - 如果启用 @all，开头插入 AtAll
-        - 识别 [img:url] 并替换为 Image 组件
-        - 如果启用 Markdown 且文本以 [MD] 开头，则用 Markdown 组件
-        - 否则用 Plain 组件
+        根据文本构建消息组件列表，代替原来的 MessageChain。
+        返回组件列表（例如 [Plain(...), Image(...)]）
         """
-        chain = MessageChain()
+        components = []
 
         # @全体成员
         if self.use_at_all:
-            chain.chain.append(AtAll())
+            components.append(AtAll())
 
         # 检测 Markdown 模式
         if self.enable_markdown and text.startswith("[MD]") and HAS_MARKDOWN:
             md_text = text[4:].strip()
-            chain.chain.append(Markdown(md_text))
-            return chain
+            components.append(Markdown(md_text))
+            return components
 
         # 处理图片占位符
-        # 将 [img:url] 转换为 Image 组件
         segments = re.split(r'(\[img:[^\]]+\])', text)
         for seg in segments:
             if seg.startswith("[img:") and seg.endswith("]"):
                 url = seg[5:-1].strip()
-                chain.chain.append(Image(url))
+                components.append(Image(url))
             else:
                 if seg.strip():
-                    chain.chain.append(Plain(seg))
-        return chain
-
-    async def _send_with_retry(self, umo: str, chain: MessageChain) -> Any:
-        """发送消息并返回消息对象（用于获取 message_id）"""
-        try:
-            result = await self.context.send_message(umo, chain)
-            return result
-        except Exception as e:
-            logger.error(f"发送广播到 {umo} 失败: {e}")
-            raise
+                    components.append(Plain(seg))
+        return components
 
     async def _broadcast_to_groups(
         self,
@@ -172,16 +158,7 @@ class BroadcastPlugin(Star):
         groups: List[str],
         text: str,
     ) -> List[dict]:
-        """
-        向 groups 发送广播，支持分段发送、消息记录和撤回消息 ID 存储。
-        返回每个群的发送结果。
-        """
         # 分段处理
-        # 注意：如果消息中包含 [img] 等，分段可能破坏完整性，因此按文本长度切分（但忽略标记）
-        # 实际上可先解析消息链，然而分段发送图片较复杂，我们仅对纯文本部分进行长度切分。
-        # 简化处理：将文本传给 _parse_message_chain 但不分段，因为图片已经占用组件，长度限制由平台决定。
-        # 所以如果文本较长且没有图片，我们分段；如果包含图片，不分段（避免错位）。这里为了稳定性，
-        # 我们判断：如果 text 不含 [img: 且长度 > max_message_length，则分段；否则单条发送。
         if "[img:" not in text and len(text) > self.max_message_length:
             segments = self._split_text(text)
         else:
@@ -193,17 +170,17 @@ class BroadcastPlugin(Star):
             group_result = {"group_id": gid, "status": "ok", "sent_messages": []}
             try:
                 for idx, seg_text in enumerate(segments):
-                    # 分段时添加标注 (如果多段)
                     if len(segments) > 1:
                         seg_text = f"({idx+1}/{len(segments)}) {seg_text}"
-                    chain = self._parse_message_chain(seg_text)
-                    msg_obj = await self._send_with_retry(umo, chain)
-                    # 尝试提取 message_id 并存储
+                    # 获取组件列表
+                    components = self._parse_message_components(seg_text)
+                    # 发送组件列表
+                    msg_obj = await self.context.send_message(umo, components)
                     msg_id = self._extract_message_id(msg_obj)
                     if msg_id:
                         self._last_broadcast_msgs[gid] = {
                             "umo": umo,
-                            "message_id": msg_id if len(segments) == 1 else None  # 多段时暂不支持全部撤回
+                            "message_id": msg_id if len(segments) == 1 else None
                         }
                     group_result["sent_messages"].append(msg_id)
             except Exception as e:
@@ -212,7 +189,6 @@ class BroadcastPlugin(Star):
                 logger.error(f"广播到 {gid} 失败: {e}")
             results.append(group_result)
 
-        # 记录日志
         self._save_log({
             "time": datetime.now().isoformat(),
             "text": text,
@@ -222,20 +198,15 @@ class BroadcastPlugin(Star):
         return results
 
     def _extract_message_id(self, msg_obj) -> Optional[str]:
-        """从发送返回的对象中提取消息ID（可能因平台而异）"""
         if msg_obj is None:
             return None
-        # 常见格式：有 message_id 属性
         if hasattr(msg_obj, "message_id"):
             return msg_obj.message_id
-        # 也可能是字典
         if isinstance(msg_obj, dict):
             return msg_obj.get("message_id")
-        # 对于 MessageChain 返回自身？未知
         return None
 
     def _split_text(self, text: str) -> List[str]:
-        """按最大长度分段文本，尽量在换行处切割"""
         if len(text) <= self.max_message_length:
             return [text]
         segments = []
@@ -263,7 +234,7 @@ class BroadcastPlugin(Star):
         return "\n".join(lines)
 
     # ------------------------------------------------------------------
-    # 指令：广播到所有群
+    # 指令
     # ------------------------------------------------------------------
     @filter.command("broadcast_all")
     async def cmd_broadcast_all(self, event: AstrMessageEvent):
@@ -283,9 +254,6 @@ class BroadcastPlugin(Star):
         results = await self._broadcast_to_groups(event, groups, text)
         yield event.plain_result(self._format_report("全群广播", results))
 
-    # ------------------------------------------------------------------
-    # 指令：广播到指定群
-    # ------------------------------------------------------------------
     @filter.command("broadcast_to")
     async def cmd_broadcast_to(self, event: AstrMessageEvent):
         if not event.is_private_chat():
@@ -305,7 +273,6 @@ class BroadcastPlugin(Star):
             return
         group_ids_raw, text = parts
         group_ids = [g.strip() for g in group_ids_raw.split(",") if g.strip()]
-        # 过滤黑名单
         if self.blacklist_groups:
             group_ids = [g for g in group_ids if g not in self.blacklist_groups]
         if not group_ids:
@@ -319,9 +286,6 @@ class BroadcastPlugin(Star):
             self._format_report(f"指定群广播 → {', '.join(group_ids)}", results)
         )
 
-    # ------------------------------------------------------------------
-    # 指令：查看定时广播状态
-    # ------------------------------------------------------------------
     @filter.command("broadcast_status")
     async def cmd_broadcast_status(self, event: AstrMessageEvent):
         if not event.is_private_chat():
@@ -350,9 +314,6 @@ class BroadcastPlugin(Star):
             msg += f"\n• 下次执行: {job.next_run_time.strftime('%Y-%m-%d %H:%M:%S')}"
         yield event.plain_result(msg)
 
-    # ------------------------------------------------------------------
-    # 指令：暂停/恢复定时广播
-    # ------------------------------------------------------------------
     @filter.command("broadcast_pause")
     async def cmd_broadcast_pause(self, event: AstrMessageEvent):
         if not event.is_private_chat():
@@ -373,9 +334,6 @@ class BroadcastPlugin(Star):
         self._paused = False
         yield event.plain_result("▶️ 定时广播已恢复")
 
-    # ------------------------------------------------------------------
-    # 指令：查看广播日志
-    # ------------------------------------------------------------------
     @filter.command("broadcast_log")
     async def cmd_broadcast_log(self, event: AstrMessageEvent):
         if not event.is_private_chat():
@@ -406,9 +364,6 @@ class BroadcastPlugin(Star):
             lines.append(f"• {time} | 群数:{len(targets)} 成功:{success} | {text}")
         yield event.plain_result("\n".join(lines))
 
-    # ------------------------------------------------------------------
-    # 指令：撤回最近广播
-    # ------------------------------------------------------------------
     @filter.command("broadcast_recall")
     async def cmd_broadcast_recall(self, event: AstrMessageEvent):
         if not event.is_private_chat():
@@ -434,15 +389,12 @@ class BroadcastPlugin(Star):
             logger.error(f"撤回失败: {e}")
             yield event.plain_result(f"❌ 撤回失败: {e}")
 
-    # ------------------------------------------------------------------
-    # 指令：帮助
-    # ------------------------------------------------------------------
     @filter.command("broadcast_help")
     async def cmd_broadcast_help(self, event: AstrMessageEvent):
         if not event.is_private_chat():
             return
         help_text = (
-            "📢 广播插件 v2.0\n"
+            "📢 广播插件 v2.0.1\n"
             "指令 (仅私聊):\n"
             "/broadcast_all <内容> — 广播到所有群\n"
             "/broadcast_to <群号> <内容> — 广播到指定群\n"
@@ -460,7 +412,7 @@ class BroadcastPlugin(Star):
         yield event.plain_result(help_text)
 
     # ------------------------------------------------------------------
-    # 定时广播核心
+    # 定时广播
     # ------------------------------------------------------------------
     def _start_scheduler(self):
         if self.scheduler:
@@ -487,19 +439,16 @@ class BroadcastPlugin(Star):
         text = self.config.get("cron_text", "")
         if not text:
             return
-        # 获取目标群
         groups = []
         if self._cron_target_groups:
             groups = self._cron_target_groups
         else:
-            # 尝试从配置或自动获取 (这里无法获取 event，只能依赖静态配置)
             group_overrides_str = self.config.get("group_overrides", "")
             groups = [g.strip() for g in group_overrides_str.split(",") if g.strip()]
             if not groups:
                 logger.warning("定时广播未配置目标群且无法自动获取，跳过")
                 return
 
-        # 过滤黑名单
         if self.blacklist_groups:
             groups = [g for g in groups if g not in self.blacklist_groups]
 
@@ -508,8 +457,8 @@ class BroadcastPlugin(Star):
         for gid in groups:
             umo = f"{platform_name}:GroupMessage:{gid}"
             try:
-                chain = self._parse_message_chain(text)
-                msg_obj = await self._send_with_retry(umo, chain)
+                components = self._parse_message_components(text)
+                msg_obj = await self.context.send_message(umo, components)
                 msg_id = self._extract_message_id(msg_obj)
                 if msg_id:
                     self._last_broadcast_msgs[gid] = {"umo": umo, "message_id": msg_id}
