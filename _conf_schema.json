@@ -1,16 +1,21 @@
 {
   "admin_ids": {
-    "description": "管理员 ID 列表（英文逗号分隔）",
+    "description": "管理员 QQ 号（支持英文逗号、中文逗号、分号、空格分隔）",
     "type": "string",
     "default": ""
   },
   "group_ids": {
-    "description": "机器人所在的所有群号列表（英文逗号分隔，用于广播目标）",
+    "description": "机器人所在的全群号列表（英文逗号分隔），用于全群广播和定时广播的 all 目标",
     "type": "string",
     "default": ""
   },
+  "adapter_id": {
+    "description": "平台适配器 ID（如 aiocqhttp_default），定时广播需要此字段构建目标",
+    "type": "string",
+    "default": "aiocqhttp_default"
+  },
   "scheduled_broadcasts": {
-    "description": "定时广播任务配置 (JSON 数组格式)",
+    "description": "定时广播任务 (JSON 数组)，格式见插件文档",
     "type": "string",
     "default": "[]"
   }
