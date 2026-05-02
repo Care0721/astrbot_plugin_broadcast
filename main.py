@@ -20,7 +20,7 @@ from astrbot.api.message_components import (
 FRIEND_MSG_TYPES = ("FriendMessage", "PrivateMessage")
 
 
-@register("astrbot_plugin_broadcast", "your_name", "广播插件", "1.0.0", "repo url")
+@register("astrbot_plugin_broadcast", "Care", "群广播功能支持定时，特定群聊广播", "1.2.0", "https://github.com/Care0721")
 class BroadcastPlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
