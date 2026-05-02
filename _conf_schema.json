@@ -1,0 +1,45 @@
+{
+  "broadcast_admin_ids": {
+    "description": "有权使用广播指令的QQ号列表（逗号分隔，留空则仅允许Bot主人）",
+    "type": "string",
+    "default": "",
+    "hint": "例如：123456,789012"
+  },
+  "broadcast_interval_seconds": {
+    "description": "广播发送间隔（秒），避免发送过快触发风控",
+    "type": "int",
+    "default": 2
+  },
+  "broadcast_max_media_size_mb": {
+    "description": "允许广播的最大文件大小（MB）",
+    "type": "int",
+    "default": 50
+  },
+  "scheduled_broadcasts": {
+    "description": "定时广播任务列表（JSON数组，自动通过网页面板管理，请勿手动修改）",
+    "type": "string",
+    "default": "[]",
+    "hint": "通过 /broadcast schedule 指令或网页面板添加"
+  },
+  "blacklist_groups": {
+    "description": "广播黑名单群号（逗号分隔，这些群不会收到任何广播）",
+    "type": "string",
+    "default": "",
+    "hint": "例如：111111,222222"
+  },
+  "broadcast_prefix": {
+    "description": "广播消息前缀（可留空）",
+    "type": "string",
+    "default": "📢 【系统广播】\n"
+  },
+  "broadcast_suffix": {
+    "description": "广播消息后缀（可留空）",
+    "type": "string",
+    "default": ""
+  },
+  "enable_broadcast_log": {
+    "description": "是否记录广播日志到文件",
+    "type": "bool",
+    "default": true
+  }
+}
