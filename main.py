@@ -36,7 +36,7 @@ SCHEDULE_STATE_PATH = os.path.join(PLUGIN_DIR, "schedule_state.json")
     name="astrbot_plugin_broadcast",
     desc="群广播插件：支持向全部/指定群发送富媒体广播，含定时广播",
     version="1.2.0",
-    author="custom",
+    author="Care",
 )
 class BroadcastPlugin(Star):
 
