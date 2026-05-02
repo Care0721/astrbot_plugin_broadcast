@@ -1,12 +1,3 @@
-"""
-AstrBot 群广播插件 v1.2.0
-功能：
-  - 私聊发送广播到全部群 / 指定群
-  - 支持图片、视频、文件等富媒体
-  - 定时广播（APScheduler）
-  - 网页端配置项
-  - 广播日志记录
-"""
 
 import json
 import os
@@ -19,10 +10,8 @@ from typing import List, Optional
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
+from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
-from astrbot.api.message.components import (
-    Plain, Image, Video, File, At, Record
-)
 from astrbot.api import logger
 from astrbot.api.platform import AstrBotMessage, MessageMember, MessageType
 
