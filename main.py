@@ -1,18 +1,13 @@
 import json
 import os
-import asyncio
-from datetime import datetime
 from typing import List, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
+from astrbot.api.event import filter, AstrMessageEvent
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
-from astrbot.api.all import *
-
-# 消息组件引入
 from astrbot.api.message_components import (
     Plain,
     Image,
@@ -22,8 +17,7 @@ from astrbot.api.message_components import (
     Record,
 )
 
-# 私聊消息类型常量（适配器可能不同，此处以 aiocqhttp 为例）
-FRIEND_MESSAGE_TYPE = "FriendMessage"
+FRIEND_MSG_TYPES = ("FriendMessage", "PrivateMessage")
 
 
 @register("astrbot_plugin_broadcast", "your_name", "广播插件", "1.0.0", "repo url")
@@ -36,23 +30,20 @@ class BroadcastPlugin(Star):
 
     # ---------- 生命周期 ----------
     async def initialize(self):
-        """插件初始化时启动定时广播调度器并加载任务。"""
-        logger.info("[广播插件] 插件初始化中...")
+        logger.info("[广播插件] 初始化...")
         self._start_scheduler()
-        logger.info("[广播插件] 插件初始化完成。")
+        logger.info("[广播插件] 初始化完成")
 
     async def terminate(self):
-        """插件卸载/重载时关闭调度器。"""
-        logger.info("[广播插件] 插件正在终止...")
+        logger.info("[广播插件] 正在停止...")
         if self.scheduler:
             self.scheduler.shutdown(wait=False)
             self.scheduler = None
-        logger.info("[广播插件] 插件终止完成。")
+        logger.info("[广播插件] 已停止")
 
-    # ---------- 工具方法 ----------
-
+    # ---------- 配置工具 ----------
     def _get_config(self) -> dict:
-        """读取 _conf_schema.json 的默认值并合并 _conf.json 的用户配置。"""
+        """读取默认配置并合并用户保存的 _conf.json"""
         schema_path = os.path.join(self._plugin_dir, "_conf_schema.json")
         defaults = {}
         if os.path.exists(schema_path):
@@ -68,67 +59,40 @@ class BroadcastPlugin(Star):
         return defaults
 
     def _get_admin_ids(self, config: dict) -> List[str]:
-        """获取管理员 ID 列表。"""
         raw = config.get("admin_ids", "")
         if not raw:
             return []
-        return [uid.strip() for uid in raw.split(",") if uid.strip()]
+        # 兼容中英文逗号、空格等
+        import re
+        return [uid.strip() for uid in re.split(r'[，,;；\s]+', raw) if uid.strip()]
 
     def _is_admin(self, event: AstrMessageEvent, admin_ids: List[str]) -> bool:
-        """检查事件发起者是否为管理员。"""
+        """检查权限并输出日志方便排查"""
         sender_id = event.get_sender_id()
-        # 兼容消息平台返回的 ID 为整型或字符串的情况
+        # 日志打印实际获取到的 id，方便管理员核对
+        logger.info(f"[广播插件] 发送者ID: {sender_id}，管理员列表: {admin_ids}")
         return str(sender_id) in admin_ids
 
-    async def _get_all_group_umos(
-        self, event: AstrMessageEvent
-    ) -> List[str]:
-        """
-        获取当前会话所在适配器下的所有群聊 unified_msg_origin 列表。
-        注意：AstrBot 目前未提供标准的 "获取所有群列表" API，
-        此处通过分析事件中的 session 信息，尝试获取适配器 ID 并构造 UMO。
-        实际使用时，群号需要根据业务场景预先配置或通过外部数据源获取。
-        """
-        # 获取当前事件的 unified_msg_origin 格式为 "platform:message_type:session_id"
-        current_umo = event.unified_msg_origin
-        logger.info(f"[广播插件] 当前会话 UMO: {current_umo}")
-        # 尝试从当前 UMO 中提取平台适配器 ID
-        parts = current_umo.split(":")
-        if len(parts) < 3:
-            logger.warning(f"[广播插件] 无法解析 UMO 格式: {current_umo}")
-            return []
+    def _get_adapter_id(self, event: AstrMessageEvent) -> str:
+        """从 unified_msg_origin 中提取平台适配器 ID"""
+        umo = event.unified_msg_origin
+        parts = umo.split(":")
+        return parts[0] if len(parts) >= 1 else "unknown"
 
-        platform_id = parts[0]  # 例如 "aiocqhttp_default"
-        # 从配置中获取已知群组列表（需用户在 WebUI 中预先配置）
+    async def _get_all_group_umos(self, event: AstrMessageEvent) -> List[str]:
+        """获取配置中所有群聊的 unified_msg_origin"""
         config = self._get_config()
         group_ids_str = config.get("group_ids", "")
         if not group_ids_str:
-            logger.warning(
-                "[广播插件] 未配置群组列表，请通过 WebUI 在配置中添加 group_ids 字段"
-            )
+            logger.warning("[广播插件] 未配置 group_ids，请在 WebUI 中填写所有群号")
             return []
 
-        group_ids = [
-            gid.strip() for gid in group_ids_str.split(",") if gid.strip()
-        ]
-        umos = []
-        for gid in group_ids:
-            # 构造群聊 UMO，格式 "平台适配器ID:群聊类型:群号"
-            umos.append(f"{platform_id}:GroupMessage:{gid}")
-        return umos
+        group_ids = [gid.strip() for gid in group_ids_str.split(",") if gid.strip()]
+        adapter_id = self._get_adapter_id(event)
+        return [f"{adapter_id}:GroupMessage:{gid}" for gid in group_ids]
 
     def _parse_message_chain(self, chain_data: List[dict]) -> List:
-        """
-        将 JSON 消息链数组转换为 AstrBot 消息组件对象列表。
-        
-        chain_data 格式示例:
-        [
-            {"type": "Plain", "data": {"text": "大家好"}},
-            {"type": "Image", "data": {"url": "https://example.com/pic.jpg"}},
-            {"type": "Video", "data": {"url": "https://example.com/video.mp4"}},
-            {"type": "File", "data": {"file": "local/file/path.txt"}}
-        ]
-        """
+        """将 JSON 消息链数组转为 AstrBot 组件对象"""
         components = []
         for item in chain_data:
             ctype = item.get("type", "")
@@ -136,28 +100,17 @@ class BroadcastPlugin(Star):
             if ctype == "Plain":
                 components.append(Plain(text=data.get("text", "")))
             elif ctype == "Image":
-                # 优先使用 file 字段（本地文件），否则使用 url
                 if "file" in data:
-                    components.append(
-                        Image.fromFileSystem(data["file"])
-                    )
+                    components.append(Image.fromFileSystem(data["file"]))
                 elif "url" in data:
-                    components.append(
-                        Image.fromURL(data["url"])
-                    )
+                    components.append(Image.fromURL(data["url"]))
             elif ctype == "Video":
                 if "file" in data:
-                    components.append(
-                        Video.fromFileSystem(data["file"])
-                    )
+                    components.append(Video.fromFileSystem(data["file"]))
                 elif "url" in data:
-                    components.append(
-                        Video.fromURL(data["url"])
-                    )
+                    components.append(Video.fromURL(data["url"]))
             elif ctype == "File":
-                components.append(
-                    File(file=data.get("file", ""), name=data.get("name", ""))
-                )
+                components.append(File(file=data.get("file", ""), name=data.get("name", "")))
             elif ctype == "At":
                 components.append(At(qq=data.get("qq", "")))
             elif ctype == "Record":
@@ -166,156 +119,154 @@ class BroadcastPlugin(Star):
                 elif "url" in data:
                     components.append(Record(file="", url=data["url"]))
             else:
-                logger.warning(f"[广播插件] 未知消息组件类型: {ctype}")
+                logger.warning(f"[广播插件] 未知组件类型: {ctype}")
         return components
 
-    async def _send_broadcast(
-        self, umo_list: List[str], chain: List, event: AstrMessageEvent
-    ) -> str:
-        """
-        向指定的 UMO 列表发送广播消息。
-        返回发送结果的摘要字符串。
-        """
+    async def _send_broadcast(self, umo_list: List[str], chain: List) -> str:
+        """向一组 UMO 发送消息，返回结果文本"""
         success = 0
         fail = 0
         for umo in umo_list:
             try:
                 await self.context.send_message(umo, chain)
                 success += 1
-                logger.info(f"[广播插件] 已发送至 {umo}")
+                logger.info(f"[广播插件] 发送成功: {umo}")
             except Exception as e:
                 fail += 1
-                logger.error(f"[广播插件] 发送至 {umo} 失败: {e}")
-
-        result = f"广播发送完成：成功 {success} 个，失败 {fail} 个。"
+                logger.error(f"[广播插件] 发送失败 {umo}: {e}")
+        msg = f"广播发送完成：成功 {success} 个，失败 {fail} 个。"
         if fail > 0:
-            result += "\n请检查 WebUI 控制台日志了解失败详情。"
-        return result
+            msg += "\n请检查控制台日志排查失败原因。"
+        return msg
+
+    def _is_friend_msg(self, event: AstrMessageEvent) -> bool:
+        """判断是否为私聊消息（兼容不同适配器类型名）"""
+        return event.get_message_type() in FRIEND_MSG_TYPES
 
     # ---------- 私聊指令 ----------
 
     @filter.command("broadcast_all")
     async def broadcast_all(self, event: AstrMessageEvent):
-        """
-        管理员私聊广播到所有群。
-        用法: /broadcast_all <消息内容>
-        通过指令后附带的消息链发送广播。
-        """
+        """管理员私聊向所有群广播"""
+        # 温馨提示：如果是群聊，提醒只能用私聊
+        if not self._is_friend_msg(event):
+            yield event.plain_result("⛔ 此指令仅限私聊使用，请直接私聊机器人。")
+            return
+
         config = self._get_config()
         admin_ids = self._get_admin_ids(config)
         if not self._is_admin(event, admin_ids):
-            yield event.plain_result("⛔ 您没有权限使用此指令。")
+            yield event.plain_result("⛔ 您没有权限使用此指令。\n若已配置管理员，请检查发送者ID是否匹配（查看控制台日志）。")
             return
 
-        # 获取所有群的 UMO 列表
         umos = await self._get_all_group_umos(event)
         if not umos:
-            yield event.plain_result("⚠️ 未找到可用的群组，请确认配置。")
+            yield event.plain_result("⚠️ 未找到任何群组，请先在 WebUI 配置「group_ids」字段。")
             return
 
-        # 优先使用消息链（支持图片/视频等富媒体），如果没有则回退到纯文本
-        message_chain = event.message_obj.message
-        if not message_chain:
+        chain = event.message_obj.message
+        if not chain:
             yield event.plain_result("⚠️ 消息内容为空。")
             return
 
-        result = await self._send_broadcast(umos, message_chain, event)
+        result = await self._send_broadcast(umos, chain)
         yield event.plain_result(result)
 
     @filter.command("broadcast_to")
     async def broadcast_to(self, event: AstrMessageEvent):
-        """
-        管理员私聊广播到指定群。
-        用法: /broadcast_to <群号> <消息内容>
-        多个群号用英文逗号分隔（不含空格），如 /broadcast_to 123456,789012 大家好
-        """
+        """管理员私聊向指定群广播（多个群号用英文逗号分隔）"""
+        if not self._is_friend_msg(event):
+            yield event.plain_result("⛔ 此指令仅限私聊使用，请直接私聊机器人。")
+            return
+
         config = self._get_config()
         admin_ids = self._get_admin_ids(config)
         if not self._is_admin(event, admin_ids):
-            yield event.plain_result("⛔ 您没有权限使用此指令。")
+            yield event.plain_result("⛔ 您没有权限使用此指令。\n若已配置管理员，请检查发送者ID是否匹配（查看控制台日志）。")
             return
 
-        # 提取指令参数
+        # 解析指令参数
         msg_str = event.message_str.strip()
-        # 去除指令前缀 "/broadcast_to "（注意后面带一个空格）
-        param_str = msg_str[len("/broadcast_to "):].strip()
-        # 找到第一个空格，分割群号和消息链
-        space_idx = param_str.find(" ")
+        # 移除指令前缀 "/broadcast_to "，注意可能有多个空格
+        cmd_prefix = "/broadcast_to"
+        if not msg_str.startswith(cmd_prefix):
+            yield event.plain_result("❌ 指令必须以 / 开头，格式：/broadcast_to 群号 消息内容")
+            return
+
+        param_str = msg_str[len(cmd_prefix):].strip()
+        # 分离群号和消息部分：找到第一个空白字符
+        if not param_str:
+            yield event.plain_result("❌ 格式错误。正确用法：/broadcast_to 群号[,群号,...] 消息内容")
+            return
+
+        # 智能分割：第一个空白字符前为群号部分，后面全部为消息
+        space_idx = -1
+        for i, ch in enumerate(param_str):
+            if ch in (' ', '\t', '\u3000'):  # 空格、制表、全角空格
+                space_idx = i
+                break
+
         if space_idx == -1:
-            yield event.plain_result(
-                "❌ 格式错误。用法: /broadcast_to <群号[,群号,...]> <消息内容>"
-            )
+            yield event.plain_result("❌ 格式错误。请用空格分隔群号和消息。\n示例：/broadcast_to 973878128 你好")
             return
 
         group_id_str = param_str[:space_idx].strip()
-        # 群号列表（英文逗号分隔）
-        target_groups = [
-            gid.strip() for gid in group_id_str.split(",") if gid.strip()
-        ]
+        # 群号后面剩下的部分是消息，但消息链已从 event 中获取，这里只做校验
+        if not group_id_str:
+            yield event.plain_result("❌ 群号不能为空。")
+            return
 
-        # 消息部分直接使用消息链，避免仅获取纯文本导致富媒体丢失
-        # 此处通过 event.message_obj.message 获取完整消息链
-        full_chain = event.message_obj.message
-        if not full_chain:
+        target_groups = [gid.strip() for gid in group_id_str.split(",") if gid.strip()]
+        if not target_groups:
+            yield event.plain_result("❌ 群号格式错误。")
+            return
+
+        # 获取消息链（直接用 event 的消息对象，支持富媒体）
+        chain = event.message_obj.message
+        if not chain:
             yield event.plain_result("⚠️ 消息内容为空。")
             return
 
-        # 构建群聊 UMO
-        platform_id = event.unified_msg_origin.split(":")[0]
-        umos = []
-        for gid in target_groups:
-            umos.append(f"{platform_id}:GroupMessage:{gid}")
+        adapter_id = self._get_adapter_id(event)
+        umos = [f"{adapter_id}:GroupMessage:{gid}" for gid in target_groups]
 
-        result = await self._send_broadcast(umos, full_chain, event)
+        result = await self._send_broadcast(umos, chain)
         yield event.plain_result(result)
 
     # ---------- 定时广播 ----------
-
     def _start_scheduler(self):
-        """启动 AsyncIOScheduler 并加载定时广播任务。"""
         if self.scheduler:
-            logger.warning("[广播插件] 调度器已运行，跳过重复启动。")
             return
-
         self.scheduler = AsyncIOScheduler()
         self._load_scheduled_jobs()
         self.scheduler.start()
-        logger.info("[广播插件] 定时广播调度器已启动。")
+        logger.info("[广播插件] 定时调度器已启动")
 
     def _load_scheduled_jobs(self):
-        """从配置中读取并注册定时广播任务。"""
         config = self._get_config()
         scheduled_str = config.get("scheduled_broadcasts", "[]")
         try:
             tasks = json.loads(scheduled_str)
         except json.JSONDecodeError:
-            logger.error("[广播插件] 定时广播配置解析失败，已跳过。")
+            logger.error("[广播插件] 定时广播配置 JSON 解析失败")
             return
-
         if not isinstance(tasks, list):
-            logger.error("[广播插件] 定时广播配置应为 JSON 数组。")
+            logger.error("[广播插件] scheduled_broadcasts 应为 JSON 数组")
             return
 
         for idx, task in enumerate(tasks):
             cron_expr = task.get("cron", "")
             groups = task.get("groups", [])
             message_data = task.get("message", [])
-
             if not cron_expr or not groups or not message_data:
-                logger.warning(
-                    f"[广播插件] 定时任务 #{idx} 配置不完整，已跳过。"
-                )
+                logger.warning(f"[广播插件] 定时任务 #{idx} 配置不完整，跳过")
                 continue
-
             try:
                 trigger = CronTrigger.from_crontab(cron_expr)
             except ValueError as e:
-                logger.error(
-                    f"[广播插件] 定时任务 #{idx} cron 表达式 '{cron_expr}' 无效: {e}"
-                )
+                logger.error(f"[广播插件] 定时任务 #{idx} cron 无效 '{cron_expr}': {e}")
                 continue
 
-            # 将闭包捕获的变量通过默认参数绑定，避免 for 循环延迟引用问题
             async def job_func(g=groups, msg=message_data):
                 await self._execute_scheduled_broadcast(g, msg)
 
@@ -323,60 +274,39 @@ class BroadcastPlugin(Star):
                 func=job_func,
                 trigger=trigger,
                 id=f"broadcast_job_{idx}",
-                name=f"定时广播任务 #{idx}",
+                name=f"定时广播 #{idx}",
                 replace_existing=True,
             )
-            logger.info(
-                f"[广播插件] 已注册定时广播任务 #{idx}: cron='{cron_expr}', "
-                f"groups={groups}"
-            )
+            logger.info(f"[广播插件] 已注册定时任务 #{idx}: cron='{cron_expr}', groups={groups}")
 
-    async def _execute_scheduled_broadcast(
-        self, groups: List[str], message_data: List[dict]
-    ):
-        """
-        执行定时广播的逻辑。
-        groups 中的 "all" 表示全部群，否则视为具体群号列表。
-        """
+    async def _execute_scheduled_broadcast(self, groups: List[str], message_data: List[dict]):
         try:
-            # 构建消息链
             chain = self._parse_message_chain(message_data)
             if not chain:
-                logger.error("[广播插件] 定时广播消息链为空，取消发送。")
+                logger.error("[广播插件] 定时广播消息链为空")
                 return
-
-            # 获取 platform_id（此处简单取第一个适配器，可根据实际情况调整）
-            platform_id = "aiocqhttp_default"
-            umos = []
+            config = self._get_config()
+            # 获取群列表：支持 "all" 或具体群号
             if "all" in groups:
-                # 全群发送：从配置读取群号列表
-                config = self._get_config()
                 group_ids_str = config.get("group_ids", "")
                 if not group_ids_str:
-                    logger.error(
-                        "[广播插件] 定时广播配置了 'all' 但未提供群号列表。"
-                    )
+                    logger.error("[广播插件] 定时广播设置了 all 但未配置 group_ids")
                     return
-                group_ids = [
-                    gid.strip() for gid in group_ids_str.split(",") if gid.strip()
-                ]
-                for gid in group_ids:
-                    umos.append(f"{platform_id}:GroupMessage:{gid}")
+                target_group_ids = [gid.strip() for gid in group_ids_str.split(",") if gid.strip()]
             else:
-                # 指定群发送
-                for gid in groups:
-                    umos.append(f"{platform_id}:GroupMessage:{gid}")
+                target_group_ids = groups
 
-            logger.info(
-                f"[广播插件] 定时广播开始执行，目标 {len(umos)} 个群。"
-            )
+            # 尝试获取适配器 ID（从配置或者使用默认值）
+            # 因为定时任务没有 event 对象，这里默认使用 "aiocqhttp_default"，
+            # 如果使用其他适配器请修改此处。
+            adapter_id = config.get("adapter_id", "aiocqhttp_default")
+            umos = [f"{adapter_id}:GroupMessage:{gid}" for gid in target_group_ids]
+            logger.info(f"[广播插件] 定时广播开始，目标 {len(umos)} 个群")
             for umo in umos:
                 try:
                     await self.context.send_message(umo, chain)
-                    logger.info(f"[广播插件] 定时广播已发送至 {umo}")
+                    logger.info(f"[广播插件] 定时发送成功: {umo}")
                 except Exception as e:
-                    logger.error(
-                        f"[广播插件] 定时广播发送至 {umo} 失败: {e}"
-                    )
+                    logger.error(f"[广播插件] 定时发送失败 {umo}: {e}")
         except Exception as e:
             logger.exception(f"[广播插件] 定时广播执行异常: {e}")
