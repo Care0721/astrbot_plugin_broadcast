@@ -1,10 +1,7 @@
-
 import json
 import os
-import re
 import asyncio
-import datetime
-import logging
+from datetime import datetime
 from typing import List, Optional
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -13,528 +10,373 @@ from apscheduler.triggers.cron import CronTrigger
 from astrbot.api.event import filter, AstrMessageEvent, MessageEventResult
 from astrbot.api.star import Context, Star, register
 from astrbot.api import logger
-from astrbot.api.platform import AstrBotMessage, MessageMember, MessageType
+from astrbot.api.all import *
 
-PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
-LOG_PATH = os.path.join(PLUGIN_DIR, "broadcast_log.txt")
-SCHEDULE_STATE_PATH = os.path.join(PLUGIN_DIR, "schedule_state.json")
-
-
-@register(
-    name="astrbot_plugin_broadcast",
-    desc="群广播插件：支持向全部/指定群发送富媒体广播，含定时广播",
-    version="1.2.0",
-    author="Care",
+# 消息组件引入
+from astrbot.api.message_components import (
+    Plain,
+    Image,
+    Video,
+    File,
+    At,
+    Record,
 )
+
+# 私聊消息类型常量（适配器可能不同，此处以 aiocqhttp 为例）
+FRIEND_MESSAGE_TYPE = "FriendMessage"
+
+
+@register("astrbot_plugin_broadcast", "your_name", "广播插件", "1.0.0", "repo url")
 class BroadcastPlugin(Star):
+    def __init__(self, context: Context):
+        super().__init__(context)
+        self.scheduler: Optional[AsyncIOScheduler] = None
+        self._plugin_dir = os.path.dirname(os.path.abspath(__file__))
+        self._config_path = os.path.join(self._plugin_dir, "_conf.json")
 
-    # ------------------------------------------------------------------ #
-    #  初始化
-    # ------------------------------------------------------------------ #
-    def __init__(self, context: Context, config: dict):
-        super().__init__(context, config)
+    # ---------- 生命周期 ----------
+    async def initialize(self):
+        """插件初始化时启动定时广播调度器并加载任务。"""
+        logger.info("[广播插件] 插件初始化中...")
+        self._start_scheduler()
+        logger.info("[广播插件] 插件初始化完成。")
 
-        self.cfg = config
-
-        # 解析管理员列表
-        raw_admins = self.cfg.get("broadcast_admin_ids", "")
-        self.admin_ids: List[str] = [
-            s.strip() for s in raw_admins.split(",") if s.strip()
-        ]
-
-        # 解析黑名单
-        raw_bl = self.cfg.get("blacklist_groups", "")
-        self.blacklist: List[str] = [
-            s.strip() for s in raw_bl.split(",") if s.strip()
-        ]
-
-        self.send_interval: float = float(self.cfg.get("broadcast_interval_seconds", 2))
-        self.prefix: str = self.cfg.get("broadcast_prefix", "📢 【系统广播】\n")
-        self.suffix: str = self.cfg.get("broadcast_suffix", "")
-        self.enable_log: bool = bool(self.cfg.get("enable_broadcast_log", True))
-
-        # 定时调度器
-        self.scheduler = AsyncIOScheduler()
-        self._load_and_register_schedules()
-        self.scheduler.start()
-
-        logger.info("[Broadcast] 插件已加载，定时任务已启动。")
-
-    # ------------------------------------------------------------------ #
-    #  权限校验
-    # ------------------------------------------------------------------ #
-    def _is_authorized(self, event: AstrMessageEvent) -> bool:
-        """检查发送者是否有广播权限（Bot主人 or 配置中的管理员）"""
-        sender_id = str(event.get_sender_id())
-        # AstrBot 主人列表
-        owner_ids = [str(uid) for uid in (self.context.base_config.get("admins_id") or [])]
-        return sender_id in owner_ids or sender_id in self.admin_ids
-
-    # ------------------------------------------------------------------ #
-    #  获取所有群列表
-    # ------------------------------------------------------------------ #
-    async def _get_all_groups(self) -> List[dict]:
-        """
-        遍历所有平台适配器，收集 group_list。
-        返回列表元素: {"platform": adapter, "group_id": str, "group_name": str}
-        """
-        results = []
-        for platform in self.context.platforms:
-            try:
-                client = platform.client
-                if hasattr(client, "get_group_list"):
-                    groups = await client.get_group_list()
-                    for g in groups:
-                        gid = str(g.get("group_id", g.get("id", "")))
-                        gname = g.get("group_name", g.get("name", gid))
-                        if gid and gid not in self.blacklist:
-                            results.append({
-                                "platform": platform,
-                                "group_id": gid,
-                                "group_name": gname,
-                            })
-            except Exception as e:
-                logger.warning(f"[Broadcast] 获取群列表失败（平台 {platform.name}）: {e}")
-        return results
-
-    # ------------------------------------------------------------------ #
-    #  构建消息链
-    # ------------------------------------------------------------------ #
-    def _build_chain(self, text: str, media_urls: List[dict]) -> list:
-        """
-        media_urls: [{"type": "image"|"video"|"file"|"record", "url": "..."}]
-        """
-        chain = []
-        full_text = self.prefix + text + self.suffix
-        if full_text.strip():
-            chain.append(Plain(full_text))
-
-        for m in media_urls:
-            t = m.get("type", "image")
-            url = m.get("url", "")
-            if not url:
-                continue
-            if t == "image":
-                chain.append(Image.fromURL(url))
-            elif t == "video":
-                chain.append(Video.fromURL(url))
-            elif t == "record":
-                chain.append(Record.fromURL(url))
-            elif t == "file":
-                chain.append(File.fromURL(url))
-        return chain
-
-    # ------------------------------------------------------------------ #
-    #  核心发送逻辑
-    # ------------------------------------------------------------------ #
-    async def _send_broadcast(
-        self,
-        text: str,
-        media_urls: List[dict],
-        target_group_ids: Optional[List[str]] = None,
-    ) -> dict:
-        """
-        发送广播。
-        target_group_ids=None 表示全部群。
-        返回 {"success": int, "fail": int, "skipped": int}
-        """
-        groups = await self._get_all_groups()
-
-        if target_group_ids:
-            target_set = set(str(g) for g in target_group_ids)
-            groups = [g for g in groups if g["group_id"] in target_set]
-
-        chain = self._build_chain(text, media_urls)
-        stats = {"success": 0, "fail": 0, "skipped": 0}
-
-        for group_info in groups:
-            gid = group_info["group_id"]
-            platform = group_info["platform"]
-            try:
-                await platform.send_msg(
-                    MessageType.GROUP_MESSAGE,
-                    gid,
-                    chain,
-                )
-                stats["success"] += 1
-                self._write_log(
-                    f"[OK] group={gid} platform={platform.name} text={text[:30]}"
-                )
-            except Exception as e:
-                stats["fail"] += 1
-                self._write_log(
-                    f"[FAIL] group={gid} platform={platform.name} err={e}"
-                )
-                logger.warning(f"[Broadcast] 发送至群 {gid} 失败: {e}")
-
-            await asyncio.sleep(self.send_interval)
-
-        return stats
-
-    # ------------------------------------------------------------------ #
-    #  日志
-    # ------------------------------------------------------------------ #
-    def _write_log(self, msg: str):
-        if not self.enable_log:
-            return
-        try:
-            ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            with open(LOG_PATH, "a", encoding="utf-8") as f:
-                f.write(f"[{ts}] {msg}\n")
-        except Exception:
-            pass
-
-    # ------------------------------------------------------------------ #
-    #  指令：/broadcast
-    # ------------------------------------------------------------------ #
-    @filter.command("broadcast")
-    async def cmd_broadcast(self, event: AstrMessageEvent):
-        """
-        私聊指令入口，格式：
-          /broadcast all <文字内容>
-          /broadcast group <群号1,群号2,...> <文字内容>
-          /broadcast list
-          /broadcast schedule add <cron> <文字内容>
-          /broadcast schedule list
-          /broadcast schedule remove <job_id>
-          /broadcast log [n]
-
-        富媒体：在文字后追加 [image:URL] [video:URL] [file:URL] [record:URL]
-        """
-        # ---- 必须私聊 ----
-        if event.get_message_type() != MessageType.FRIEND_MESSAGE:
-            yield event.plain_result("⚠️ 广播指令只能在私聊中使用。")
-            return
-
-        # ---- 权限 ----
-        if not self._is_authorized(event):
-            yield event.plain_result("❌ 你没有使用广播指令的权限。")
-            return
-
-        raw = event.get_message_str().strip()
-        # 去掉指令头
-        raw = re.sub(r"^/broadcast\s*", "", raw, flags=re.IGNORECASE).strip()
-
-        # -- list：查看所有群 --
-        if raw.lower() == "list":
-            async for result in self._cmd_list(event):
-                yield result
-            return
-
-        # -- log [n]：查看日志 --
-        if raw.lower().startswith("log"):
-            async for result in self._cmd_log(event, raw):
-                yield result
-            return
-
-        # -- schedule 子命令 --
-        if raw.lower().startswith("schedule"):
-            async for result in self._cmd_schedule(event, raw):
-                yield result
-            return
-
-        # -- all <内容> --
-        if raw.lower().startswith("all ") or raw.lower() == "all":
-            content = raw[4:].strip()
-            text, media = self._parse_content(content)
-            yield event.plain_result("📡 正在向所有群发送广播，请稍候……")
-            stats = await self._send_broadcast(text, media)
-            yield event.plain_result(
-                f"✅ 广播完成！\n成功：{stats['success']} 群\n失败：{stats['fail']} 群"
-            )
-            return
-
-        # -- group <群号,...> <内容> --
-        if raw.lower().startswith("group "):
-            rest = raw[6:].strip()
-            # 提取群号部分（支持逗号/空格分隔，直到遇到非数字/非逗号）
-            m = re.match(r"^([\d,\s]+?)\s+(.+)$", rest, re.DOTALL)
-            if not m:
-                yield event.plain_result(
-                    "⚠️ 格式错误。\n用法：/broadcast group <群号1,群号2> <内容>"
-                )
-                return
-            group_ids = [g.strip() for g in m.group(1).replace(" ", ",").split(",") if g.strip()]
-            content = m.group(2).strip()
-            text, media = self._parse_content(content)
-            yield event.plain_result(
-                f"📡 正在向指定 {len(group_ids)} 个群发送广播，请稍候……"
-            )
-            stats = await self._send_broadcast(text, media, target_group_ids=group_ids)
-            yield event.plain_result(
-                f"✅ 广播完成！\n成功：{stats['success']} 群\n失败：{stats['fail']} 群"
-            )
-            return
-
-        # -- 帮助 --
-        yield event.plain_result(self._help_text())
-
-    # ------------------------------------------------------------------ #
-    #  子命令：list
-    # ------------------------------------------------------------------ #
-    async def _cmd_list(self, event: AstrMessageEvent):
-        groups = await self._get_all_groups()
-        if not groups:
-            yield event.plain_result("当前 Bot 未加入任何群，或获取群列表失败。")
-            return
-        lines = [f"📋 Bot 已加入 {len(groups)} 个群："]
-        for i, g in enumerate(groups, 1):
-            lines.append(f"{i}. [{g['group_id']}] {g['group_name']} ({g['platform'].name})")
-        yield event.plain_result("\n".join(lines))
-
-    # ------------------------------------------------------------------ #
-    #  子命令：log
-    # ------------------------------------------------------------------ #
-    async def _cmd_log(self, event: AstrMessageEvent, raw: str):
-        parts = raw.split()
-        n = 20
-        if len(parts) >= 2 and parts[1].isdigit():
-            n = int(parts[1])
-        if not os.path.exists(LOG_PATH):
-            yield event.plain_result("暂无广播日志。")
-            return
-        with open(LOG_PATH, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        tail = lines[-n:]
-        yield event.plain_result(f"📜 最近 {len(tail)} 条广播日志：\n" + "".join(tail))
-
-    # ------------------------------------------------------------------ #
-    #  子命令：schedule
-    # ------------------------------------------------------------------ #
-    async def _cmd_schedule(self, event: AstrMessageEvent, raw: str):
-        # 去掉 "schedule" 前缀
-        rest = raw[8:].strip()
-
-        # schedule list
-        if rest.lower() == "list" or rest == "":
-            jobs = self._load_schedule_state()
-            if not jobs:
-                yield event.plain_result("📅 暂无定时广播任务。")
-                return
-            lines = [f"📅 当前定时广播任务（{len(jobs)} 个）："]
-            for j in jobs:
-                target = j.get("target", "all")
-                lines.append(
-                    f"  ID: {j['id']}\n"
-                    f"  Cron: {j['cron']}\n"
-                    f"  目标: {target}\n"
-                    f"  内容: {j['text'][:40]}…\n"
-                    f"  媒体: {len(j.get('media', []))} 个\n"
-                )
-            yield event.plain_result("\n".join(lines))
-            return
-
-        # schedule remove <id>
-        m = re.match(r"^remove\s+(\S+)$", rest, re.IGNORECASE)
-        if m:
-            job_id = m.group(1)
-            removed = self._remove_scheduled_job(job_id)
-            if removed:
-                yield event.plain_result(f"✅ 已删除定时任务 [{job_id}]。")
-            else:
-                yield event.plain_result(f"❌ 未找到任务 [{job_id}]。")
-            return
-
-        # schedule add <cron> [group <群号,...>] <内容>
-        # cron 格式：分 时 日 月 周  共5段
-        m = re.match(
-            r"^add\s+"
-            r"((?:\S+\s+){4}\S+)"          # cron (5 fields)
-            r"\s+"
-            r"(?:group\s+([\d,\s]+?)\s+)?"  # optional group list
-            r"(.+)$",                        # content
-            rest,
-            re.IGNORECASE | re.DOTALL,
-        )
-        if not m:
-            yield event.plain_result(
-                "⚠️ 格式错误。\n"
-                "用法：/broadcast schedule add <cron5段> [group <群号,...>] <内容>\n"
-                "示例：/broadcast schedule add 0 9 * * 1 早安，大家好！\n"
-                "      /broadcast schedule add 0 12 * * * group 123,456 午餐提醒"
-            )
-            return
-
-        cron_str = m.group(1).strip()
-        group_raw = m.group(2)
-        content = m.group(3).strip()
-
-        target_groups = None
-        if group_raw:
-            target_groups = [g.strip() for g in group_raw.replace(" ", ",").split(",") if g.strip()]
-
-        text, media = self._parse_content(content)
-
-        try:
-            cron_parts = cron_str.split()
-            trigger = CronTrigger(
-                minute=cron_parts[0],
-                hour=cron_parts[1],
-                day=cron_parts[2],
-                month=cron_parts[3],
-                day_of_week=cron_parts[4],
-            )
-        except Exception as e:
-            yield event.plain_result(f"❌ Cron 表达式解析失败: {e}")
-            return
-
-        job_id = datetime.datetime.now().strftime("job_%Y%m%d%H%M%S")
-        job_data = {
-            "id": job_id,
-            "cron": cron_str,
-            "target": ",".join(target_groups) if target_groups else "all",
-            "text": text,
-            "media": media,
-        }
-
-        self.scheduler.add_job(
-            self._scheduled_broadcast_task,
-            trigger=trigger,
-            id=job_id,
-            args=[job_data],
-            replace_existing=True,
-        )
-        self._save_scheduled_job(job_data)
-
-        target_str = f"群 {job_data['target']}" if target_groups else "全部群"
-        yield event.plain_result(
-            f"✅ 定时广播已添加！\n"
-            f"  任务ID: {job_id}\n"
-            f"  Cron:   {cron_str}\n"
-            f"  目标:   {target_str}\n"
-            f"  内容:   {text[:40]}"
-        )
-
-    # ------------------------------------------------------------------ #
-    #  定时任务执行函数
-    # ------------------------------------------------------------------ #
-    async def _scheduled_broadcast_task(self, job_data: dict):
-        text = job_data.get("text", "")
-        media = job_data.get("media", [])
-        target = job_data.get("target", "all")
-
-        target_groups = None
-        if target != "all":
-            target_groups = [g.strip() for g in target.split(",") if g.strip()]
-
-        logger.info(f"[Broadcast] 执行定时任务 {job_data['id']} → 目标={target}")
-        stats = await self._send_broadcast(text, media, target_group_ids=target_groups)
-        logger.info(
-            f"[Broadcast] 定时任务 {job_data['id']} 完成: "
-            f"成功={stats['success']} 失败={stats['fail']}"
-        )
-
-    # ------------------------------------------------------------------ #
-    #  定时任务持久化
-    # ------------------------------------------------------------------ #
-    def _load_schedule_state(self) -> List[dict]:
-        if not os.path.exists(SCHEDULE_STATE_PATH):
-            return []
-        try:
-            with open(SCHEDULE_STATE_PATH, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            return []
-
-    def _save_schedule_state(self, jobs: List[dict]):
-        with open(SCHEDULE_STATE_PATH, "w", encoding="utf-8") as f:
-            json.dump(jobs, f, ensure_ascii=False, indent=2)
-
-    def _save_scheduled_job(self, job_data: dict):
-        jobs = self._load_schedule_state()
-        jobs = [j for j in jobs if j["id"] != job_data["id"]]
-        jobs.append(job_data)
-        self._save_schedule_state(jobs)
-
-    def _remove_scheduled_job(self, job_id: str) -> bool:
-        jobs = self._load_schedule_state()
-        new_jobs = [j for j in jobs if j["id"] != job_id]
-        if len(new_jobs) == len(jobs):
-            return False
-        self._save_schedule_state(new_jobs)
-        try:
-            self.scheduler.remove_job(job_id)
-        except Exception:
-            pass
-        return True
-
-    def _load_and_register_schedules(self):
-        """启动时从持久化文件恢复所有定时任务"""
-        jobs = self._load_schedule_state()
-        for job_data in jobs:
-            try:
-                cron_parts = job_data["cron"].split()
-                trigger = CronTrigger(
-                    minute=cron_parts[0],
-                    hour=cron_parts[1],
-                    day=cron_parts[2],
-                    month=cron_parts[3],
-                    day_of_week=cron_parts[4],
-                )
-                self.scheduler.add_job(
-                    self._scheduled_broadcast_task,
-                    trigger=trigger,
-                    id=job_data["id"],
-                    args=[job_data],
-                    replace_existing=True,
-                )
-                logger.info(f"[Broadcast] 已恢复定时任务: {job_data['id']} cron={job_data['cron']}")
-            except Exception as e:
-                logger.warning(f"[Broadcast] 恢复定时任务失败 {job_data.get('id')}: {e}")
-
-    # ------------------------------------------------------------------ #
-    #  解析内容（文字 + 媒体标记）
-    # ------------------------------------------------------------------ #
-    @staticmethod
-    def _parse_content(content: str):
-        """
-        从内容字符串中提取文字与媒体 URL。
-        媒体格式：[image:URL] [video:URL] [file:URL] [record:URL]
-        """
-        media_pattern = re.compile(
-            r"\[(image|video|file|record):([^\]]+)\]", re.IGNORECASE
-        )
-        media_urls = []
-        for m in media_pattern.finditer(content):
-            media_urls.append({"type": m.group(1).lower(), "url": m.group(2).strip()})
-
-        text = media_pattern.sub("", content).strip()
-        return text, media_urls
-
-    # ------------------------------------------------------------------ #
-    #  帮助文本
-    # ------------------------------------------------------------------ #
-    @staticmethod
-    def _help_text() -> str:
-        return (
-            "📢 广播插件使用说明\n\n"
-            "【向全部群广播】\n"
-            "/broadcast all <内容>\n\n"
-            "【向指定群广播】\n"
-            "/broadcast group <群号1,群号2,...> <内容>\n\n"
-            "【查看已加入的群】\n"
-            "/broadcast list\n\n"
-            "【查看广播日志】\n"
-            "/broadcast log [条数]\n\n"
-            "【定时广播】\n"
-            "/broadcast schedule add <cron5段> [group <群号,...>] <内容>\n"
-            "/broadcast schedule list\n"
-            "/broadcast schedule remove <任务ID>\n\n"
-            "【富媒体格式】在内容末尾追加：\n"
-            "  [image:图片URL]\n"
-            "  [video:视频URL]\n"
-            "  [file:文件URL]\n"
-            "  [record:语音URL]\n\n"
-            "示例：\n"
-            "  /broadcast all 大家好！[image:https://example.com/1.jpg]\n"
-            "  /broadcast group 123456,789012 紧急通知！\n"
-            "  /broadcast schedule add 0 8 * * * 早安！"
-        )
-
-    # ------------------------------------------------------------------ #
-    #  插件销毁
-    # ------------------------------------------------------------------ #
-    async def destroy(self):
-        if self.scheduler.running:
+    async def terminate(self):
+        """插件卸载/重载时关闭调度器。"""
+        logger.info("[广播插件] 插件正在终止...")
+        if self.scheduler:
             self.scheduler.shutdown(wait=False)
-        logger.info("[Broadcast] 插件已卸载，定时任务已停止。")
+            self.scheduler = None
+        logger.info("[广播插件] 插件终止完成。")
+
+    # ---------- 工具方法 ----------
+
+    def _get_config(self) -> dict:
+        """读取 _conf_schema.json 的默认值并合并 _conf.json 的用户配置。"""
+        schema_path = os.path.join(self._plugin_dir, "_conf_schema.json")
+        defaults = {}
+        if os.path.exists(schema_path):
+            with open(schema_path, "r", encoding="utf-8") as f:
+                schema = json.load(f)
+            for key, val in schema.items():
+                defaults[key] = val.get("default", "")
+
+        if os.path.exists(self._config_path):
+            with open(self._config_path, "r", encoding="utf-8") as f:
+                user_conf = json.load(f)
+            defaults.update(user_conf)
+        return defaults
+
+    def _get_admin_ids(self, config: dict) -> List[str]:
+        """获取管理员 ID 列表。"""
+        raw = config.get("admin_ids", "")
+        if not raw:
+            return []
+        return [uid.strip() for uid in raw.split(",") if uid.strip()]
+
+    def _is_admin(self, event: AstrMessageEvent, admin_ids: List[str]) -> bool:
+        """检查事件发起者是否为管理员。"""
+        sender_id = event.get_sender_id()
+        # 兼容消息平台返回的 ID 为整型或字符串的情况
+        return str(sender_id) in admin_ids
+
+    async def _get_all_group_umos(
+        self, event: AstrMessageEvent
+    ) -> List[str]:
+        """
+        获取当前会话所在适配器下的所有群聊 unified_msg_origin 列表。
+        注意：AstrBot 目前未提供标准的 "获取所有群列表" API，
+        此处通过分析事件中的 session 信息，尝试获取适配器 ID 并构造 UMO。
+        实际使用时，群号需要根据业务场景预先配置或通过外部数据源获取。
+        """
+        # 获取当前事件的 unified_msg_origin 格式为 "platform:message_type:session_id"
+        current_umo = event.unified_msg_origin
+        logger.info(f"[广播插件] 当前会话 UMO: {current_umo}")
+        # 尝试从当前 UMO 中提取平台适配器 ID
+        parts = current_umo.split(":")
+        if len(parts) < 3:
+            logger.warning(f"[广播插件] 无法解析 UMO 格式: {current_umo}")
+            return []
+
+        platform_id = parts[0]  # 例如 "aiocqhttp_default"
+        # 从配置中获取已知群组列表（需用户在 WebUI 中预先配置）
+        config = self._get_config()
+        group_ids_str = config.get("group_ids", "")
+        if not group_ids_str:
+            logger.warning(
+                "[广播插件] 未配置群组列表，请通过 WebUI 在配置中添加 group_ids 字段"
+            )
+            return []
+
+        group_ids = [
+            gid.strip() for gid in group_ids_str.split(",") if gid.strip()
+        ]
+        umos = []
+        for gid in group_ids:
+            # 构造群聊 UMO，格式 "平台适配器ID:群聊类型:群号"
+            umos.append(f"{platform_id}:GroupMessage:{gid}")
+        return umos
+
+    def _parse_message_chain(self, chain_data: List[dict]) -> List:
+        """
+        将 JSON 消息链数组转换为 AstrBot 消息组件对象列表。
+        
+        chain_data 格式示例:
+        [
+            {"type": "Plain", "data": {"text": "大家好"}},
+            {"type": "Image", "data": {"url": "https://example.com/pic.jpg"}},
+            {"type": "Video", "data": {"url": "https://example.com/video.mp4"}},
+            {"type": "File", "data": {"file": "local/file/path.txt"}}
+        ]
+        """
+        components = []
+        for item in chain_data:
+            ctype = item.get("type", "")
+            data = item.get("data", {})
+            if ctype == "Plain":
+                components.append(Plain(text=data.get("text", "")))
+            elif ctype == "Image":
+                # 优先使用 file 字段（本地文件），否则使用 url
+                if "file" in data:
+                    components.append(
+                        Image.fromFileSystem(data["file"])
+                    )
+                elif "url" in data:
+                    components.append(
+                        Image.fromURL(data["url"])
+                    )
+            elif ctype == "Video":
+                if "file" in data:
+                    components.append(
+                        Video.fromFileSystem(data["file"])
+                    )
+                elif "url" in data:
+                    components.append(
+                        Video.fromURL(data["url"])
+                    )
+            elif ctype == "File":
+                components.append(
+                    File(file=data.get("file", ""), name=data.get("name", ""))
+                )
+            elif ctype == "At":
+                components.append(At(qq=data.get("qq", "")))
+            elif ctype == "Record":
+                if "file" in data:
+                    components.append(Record(file=data["file"], url=data.get("url", "")))
+                elif "url" in data:
+                    components.append(Record(file="", url=data["url"]))
+            else:
+                logger.warning(f"[广播插件] 未知消息组件类型: {ctype}")
+        return components
+
+    async def _send_broadcast(
+        self, umo_list: List[str], chain: List, event: AstrMessageEvent
+    ) -> str:
+        """
+        向指定的 UMO 列表发送广播消息。
+        返回发送结果的摘要字符串。
+        """
+        success = 0
+        fail = 0
+        for umo in umo_list:
+            try:
+                await self.context.send_message(umo, chain)
+                success += 1
+                logger.info(f"[广播插件] 已发送至 {umo}")
+            except Exception as e:
+                fail += 1
+                logger.error(f"[广播插件] 发送至 {umo} 失败: {e}")
+
+        result = f"广播发送完成：成功 {success} 个，失败 {fail} 个。"
+        if fail > 0:
+            result += "\n请检查 WebUI 控制台日志了解失败详情。"
+        return result
+
+    # ---------- 私聊指令 ----------
+
+    @filter.command("broadcast_all")
+    async def broadcast_all(self, event: AstrMessageEvent):
+        """
+        管理员私聊广播到所有群。
+        用法: /broadcast_all <消息内容>
+        通过指令后附带的消息链发送广播。
+        """
+        config = self._get_config()
+        admin_ids = self._get_admin_ids(config)
+        if not self._is_admin(event, admin_ids):
+            yield event.plain_result("⛔ 您没有权限使用此指令。")
+            return
+
+        # 获取所有群的 UMO 列表
+        umos = await self._get_all_group_umos(event)
+        if not umos:
+            yield event.plain_result("⚠️ 未找到可用的群组，请确认配置。")
+            return
+
+        # 优先使用消息链（支持图片/视频等富媒体），如果没有则回退到纯文本
+        message_chain = event.message_obj.message
+        if not message_chain:
+            yield event.plain_result("⚠️ 消息内容为空。")
+            return
+
+        result = await self._send_broadcast(umos, message_chain, event)
+        yield event.plain_result(result)
+
+    @filter.command("broadcast_to")
+    async def broadcast_to(self, event: AstrMessageEvent):
+        """
+        管理员私聊广播到指定群。
+        用法: /broadcast_to <群号> <消息内容>
+        多个群号用英文逗号分隔（不含空格），如 /broadcast_to 123456,789012 大家好
+        """
+        config = self._get_config()
+        admin_ids = self._get_admin_ids(config)
+        if not self._is_admin(event, admin_ids):
+            yield event.plain_result("⛔ 您没有权限使用此指令。")
+            return
+
+        # 提取指令参数
+        msg_str = event.message_str.strip()
+        # 去除指令前缀 "/broadcast_to "（注意后面带一个空格）
+        param_str = msg_str[len("/broadcast_to "):].strip()
+        # 找到第一个空格，分割群号和消息链
+        space_idx = param_str.find(" ")
+        if space_idx == -1:
+            yield event.plain_result(
+                "❌ 格式错误。用法: /broadcast_to <群号[,群号,...]> <消息内容>"
+            )
+            return
+
+        group_id_str = param_str[:space_idx].strip()
+        # 群号列表（英文逗号分隔）
+        target_groups = [
+            gid.strip() for gid in group_id_str.split(",") if gid.strip()
+        ]
+
+        # 消息部分直接使用消息链，避免仅获取纯文本导致富媒体丢失
+        # 此处通过 event.message_obj.message 获取完整消息链
+        full_chain = event.message_obj.message
+        if not full_chain:
+            yield event.plain_result("⚠️ 消息内容为空。")
+            return
+
+        # 构建群聊 UMO
+        platform_id = event.unified_msg_origin.split(":")[0]
+        umos = []
+        for gid in target_groups:
+            umos.append(f"{platform_id}:GroupMessage:{gid}")
+
+        result = await self._send_broadcast(umos, full_chain, event)
+        yield event.plain_result(result)
+
+    # ---------- 定时广播 ----------
+
+    def _start_scheduler(self):
+        """启动 AsyncIOScheduler 并加载定时广播任务。"""
+        if self.scheduler:
+            logger.warning("[广播插件] 调度器已运行，跳过重复启动。")
+            return
+
+        self.scheduler = AsyncIOScheduler()
+        self._load_scheduled_jobs()
+        self.scheduler.start()
+        logger.info("[广播插件] 定时广播调度器已启动。")
+
+    def _load_scheduled_jobs(self):
+        """从配置中读取并注册定时广播任务。"""
+        config = self._get_config()
+        scheduled_str = config.get("scheduled_broadcasts", "[]")
+        try:
+            tasks = json.loads(scheduled_str)
+        except json.JSONDecodeError:
+            logger.error("[广播插件] 定时广播配置解析失败，已跳过。")
+            return
+
+        if not isinstance(tasks, list):
+            logger.error("[广播插件] 定时广播配置应为 JSON 数组。")
+            return
+
+        for idx, task in enumerate(tasks):
+            cron_expr = task.get("cron", "")
+            groups = task.get("groups", [])
+            message_data = task.get("message", [])
+
+            if not cron_expr or not groups or not message_data:
+                logger.warning(
+                    f"[广播插件] 定时任务 #{idx} 配置不完整，已跳过。"
+                )
+                continue
+
+            try:
+                trigger = CronTrigger.from_crontab(cron_expr)
+            except ValueError as e:
+                logger.error(
+                    f"[广播插件] 定时任务 #{idx} cron 表达式 '{cron_expr}' 无效: {e}"
+                )
+                continue
+
+            # 将闭包捕获的变量通过默认参数绑定，避免 for 循环延迟引用问题
+            async def job_func(g=groups, msg=message_data):
+                await self._execute_scheduled_broadcast(g, msg)
+
+            self.scheduler.add_job(
+                func=job_func,
+                trigger=trigger,
+                id=f"broadcast_job_{idx}",
+                name=f"定时广播任务 #{idx}",
+                replace_existing=True,
+            )
+            logger.info(
+                f"[广播插件] 已注册定时广播任务 #{idx}: cron='{cron_expr}', "
+                f"groups={groups}"
+            )
+
+    async def _execute_scheduled_broadcast(
+        self, groups: List[str], message_data: List[dict]
+    ):
+        """
+        执行定时广播的逻辑。
+        groups 中的 "all" 表示全部群，否则视为具体群号列表。
+        """
+        try:
+            # 构建消息链
+            chain = self._parse_message_chain(message_data)
+            if not chain:
+                logger.error("[广播插件] 定时广播消息链为空，取消发送。")
+                return
+
+            # 获取 platform_id（此处简单取第一个适配器，可根据实际情况调整）
+            platform_id = "aiocqhttp_default"
+            umos = []
+            if "all" in groups:
+                # 全群发送：从配置读取群号列表
+                config = self._get_config()
+                group_ids_str = config.get("group_ids", "")
+                if not group_ids_str:
+                    logger.error(
+                        "[广播插件] 定时广播配置了 'all' 但未提供群号列表。"
+                    )
+                    return
+                group_ids = [
+                    gid.strip() for gid in group_ids_str.split(",") if gid.strip()
+                ]
+                for gid in group_ids:
+                    umos.append(f"{platform_id}:GroupMessage:{gid}")
+            else:
+                # 指定群发送
+                for gid in groups:
+                    umos.append(f"{platform_id}:GroupMessage:{gid}")
+
+            logger.info(
+                f"[广播插件] 定时广播开始执行，目标 {len(umos)} 个群。"
+            )
+            for umo in umos:
+                try:
+                    await self.context.send_message(umo, chain)
+                    logger.info(f"[广播插件] 定时广播已发送至 {umo}")
+                except Exception as e:
+                    logger.error(
+                        f"[广播插件] 定时广播发送至 {umo} 失败: {e}"
+                    )
+        except Exception as e:
+            logger.exception(f"[广播插件] 定时广播执行异常: {e}")
